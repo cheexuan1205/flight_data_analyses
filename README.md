@@ -55,6 +55,6 @@ I have performed Exploratory Data Analysis (EDA) using R programming and Python 
 
 The details of my analyses can be found in the pdf file below.
 
-[Report of Flight Data Analyses and Flight Delays Prediction.pdf](https://github.com/cheexuan1205/flight_data_analyses/files/8490205/Report.of.Flight.Data.Analyses.and.Flight.Delays.Prediction.pdf)
+[Report of Flight Data Analyses and Flight Delays Prediction.pdf](https://github.com/cheexuan1205/flight_data_analyses/files/8490442/Report.of.Flight.Data.Analyses.and.Flight.Delays.Prediction.pdf)
 
 © 2022 YUI CHEE XUAN
