@@ -1,0 +1,940 @@
+---
+title: "Flight Data Analyses and Flight Delays Prediction Project using R"
+author: "© 2022 YUI CHEE XUAN"
+date: "2/22/2022"
+output: html_document
+code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Import Required Library for database creation
+```{r import library}
+library(RSQLite)
+library(DBI)
+# install.packages("data.table")
+# for using 'fread' function
+library(data.table)
+# install.packages("R.utils") 
+# for reading bz2 file using 'fread' function as shown below
+library(R.utils)
+library(ggplot2)
+```
+
+```{r}
+if (file.exists("flight.db"))
+  file.remove("flight.db")
+```
+
+## Create SQLite Database
+```{r}
+conn <- dbConnect(RSQLite::SQLite(),"flight.db")
+# Check for existing table
+dbListTables(conn)
+```
+
+## Read Main CSV Files from Year 2004 to 2006 
+```{r}
+# An efficient way to read bz2 files
+for (i in c(2004:2006)) {
+  file.name <- paste0(i,".csv.bz2")
+  print(paste("Processing:",i))
+  delays <- fread(file.name)
+  if (i == 2004) {
+    dbWriteTable(conn,"delays",delays)
+  } else {
+    dbWriteTable(conn,"delays",delays, append = TRUE)
+  }
+}
+```
+
+## Read Supplementary CSV Files  
+```{r}
+airports <- read.csv("airports.csv",header = TRUE)
+carriers <- read.csv("carriers.csv",header = TRUE)
+planes <- read.csv("plane-data.csv",header = TRUE)
+dbWriteTable(conn, "airports",airports)
+dbWriteTable(conn, "carriers",carriers)
+dbWriteTable(conn, "planes",planes)
+```
+
+## Have a look on the SQLite databases
+```{r}
+dbListTables(conn)
+dbListFields(conn, "airports")
+dbListFields(conn, "carriers")
+dbListFields(conn, "delays")
+dbListFields(conn, "planes")
+```
+
+```{r Create reference to table for dplyr}
+library(dplyr)
+library(DBI)
+delays_db <- tbl(conn,"delays")
+planes_db <- tbl(conn,"planes")
+carriers_db <- tbl(conn, "carriers")
+airports_db <- tbl(conn, "airports")
+```
+
+## Exploratory Data Analysis (EDA) and Data Wrangling for Q1-Q4
+
+## Q1. When is the best time of day, day of the week, and time of year to fly to minimise delays?
+To be logical, the following analyses are the best time to fly to minimise delay based on time of the day, day of the week, day of the month and the best month respectively.
+
+I extracted the query data that was required to answer this question from the SQLite database that I had created in the beginning of this project using SQL commands. 
+
+As the question is asking pertaining to minimise delay, I extracted the data with only the arrival delays being > 0. Arrival delay less than and equal to 0 is not considered delay and then should be filtered to avoid inaccuracy when calculating the mean of arrival delays. This sense holds for the following questions too.
+
+```{r Extract data from database and saved as data frame}
+delays.df <- dbGetQuery(conn,
+                        "SELECT * FROM delays
+                        WHERE delays.ArrDelay > 0")
+```
+
+```{r}
+summary(delays.df)
+```
+
+```{r Create a function for best time to fly by counting average arrival delayed}
+best.time.to.fly <-  function(x) {
+  # get the mean of the ArrDelay column grouped by "x"
+  tapply(delays.df$ArrDelay, x, mean, na.rm= TRUE) %>%
+    as.data.frame() %>%
+    rename(ArrDelay=".") %>%
+    arrange(ArrDelay)
+}
+```
+
+```{r Create a function for creating new column based on index for usage in ggplot}
+newcol <- function(df) {
+  cbind(colname=rownames(df), df)
+}
+```
+
+```{r Create a fuction for visualisation for most of the queries of Question 1}
+library(ggplot2)
+bar <- function(df, xvar, maintitle, xtitle) {
+  ggplot(df, aes(x = reorder(xvar,ArrDelay), y = ArrDelay)) + 
+  #asking R to use the y-value we provide for the dependent variable (stat = "identity")
+  geom_bar(stat = "identity", width=0.7, fill = "blue", colour="black") +
+  labs(title = maintitle, 
+       x = xtitle, y = "Average Arrival Delayed (in minutes)") +
+  theme_bw() +
+  theme(title = element_text(face = "bold", size=12), 
+        plot.title = element_text(hjust = 0.5),
+        axis.title = element_text(face = "bold"),
+        axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12),
+        plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) 
+}
+```
+
+Best time of the day to fly
+```{r Find the best time of the day to fly}
+best.time.of.day <- best.time.to.fly(delays.df$DepTime) # use actual departure time
+
+# create column for x variable in the visualisation and rename the column name
+best.time.of.day <- newcol(best.time.of.day) %>%
+  rename(TimeOfDay=colname)
+
+# answer one of the queries in question 1
+print(paste(as.numeric(rownames(best.time.of.day)[1]),"is the best time of the day to fly to minimise delays where the lowest average arrival delayed betwwen year 2004 and 2006 is", round(best.time.of.day[1,2],1),"minutes."))
+
+# insert new ascending index numbers based on rows
+rownames(best.time.of.day) <- 1:nrow(best.time.of.day)
+```
+
+```{r Time series visualisation}
+len = length(best.time.of.day$TimeOfDay)
+# create new column for time in 24 hours
+best.time.of.day$TimeofDay = c(rep(0,len))
+for (i in 1:len) {
+  if(any(nchar(as.character(best.time.of.day$TimeOfDay[i])) == 3)) {
+    best.time.of.day[i,3] = paste0("0",best.time.of.day$TimeOfDay[i])
+  } else if (any(nchar(as.character(best.time.of.day$TimeOfDay[i])) == 2)) {
+    best.time.of.day[i,3] = paste0("00",best.time.of.day$TimeOfDay[i])
+  } else if (any(nchar(as.character(best.time.of.day$TimeOfDay[i])) == 1)) {
+    best.time.of.day[i,3] = paste0("000",best.time.of.day$TimeOfDay[i])
+  } else{
+    best.time.of.day[i,3] = as.character(best.time.of.day$TimeOfDay[i])
+  }
+}
+
+# create a variable for vertical line on the lowest average arrival delay
+x.value <- best.time.of.day$TimeofDay[1]
+
+# create a specific point for visualisation on the lowest average arrival delay
+subs <- head(best.time.of.day,1)
+
+# arrange by TimeofDay column for time series plot
+best.time.of.day <- best.time.of.day %>%
+  arrange(TimeofDay)
+
+ptimeofday <- ggplot(best.time.of.day, aes(x = TimeofDay, y = ArrDelay, group = 1)) + 
+  geom_line(colour="blue") +
+  labs(title = "Average Arrival Delays between 2004 and 2006 by Time of Day", 
+       x = "Time of Day", y = "Average Arrival Delayed (in minutes)") +
+  #coord_cartesian(xlim = c(0000, 2359)) +
+  #coord_cartesian(xlim = c(0000, as.numeric(best.time.of.day[nrow(best.time.of.day),3])) +
+  theme_bw() +
+  theme(title = element_text(face = "bold", size=12), 
+        plot.title = element_text(hjust = 0.5),
+        axis.title = element_text(face = "bold"),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.y = element_text(size = 12),
+        plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+
+# draw horizontal line on the lowest average arrival delay
+y.value <- min(best.time.of.day$ArrDelay)
+ptimeofday <- ptimeofday +
+  geom_hline(yintercept=y.value, linetype="dashed", 
+                color = "red", size = 0.8)
+
+#  draw vertical line on the lowest average arrival delay using x.value created previously
+ptimeofday <- ptimeofday +
+  geom_vline(xintercept=x.value, linetype="dashed", 
+                colour = "red", size = 0.8)
+
+# label a data point on the lowest average arrival delay
+ptimeofday <- ptimeofday +
+  geom_text(data=subs, aes(label= TimeofDay), colour = "black", vjust = 1.1,
+            fontface = 'bold')
+ptimeofday
+```
+
+Best day of the week to fly
+```{r Find the best day of the week to fly}
+best.day.of.week <- best.time.to.fly(delays.df$DayOfWeek)
+
+# create column for x variable in the visualisation and rename the column name
+best.day.of.week <- newcol(best.day.of.week) %>%
+  rename(DayOfWeek=colname)
+
+# answer one of the queries in question 1
+print(paste(as.numeric(rownames(best.day.of.week)[1]),"(Saturday) is the best day of the week to fly to minimise delays where the lowest average arrival delayed betwwen year 2004 and 2006 is", round(best.day.of.week[1,2],1),"minutes."))
+
+# insert new ascending index numbers based on rows
+rownames(best.day.of.week) <- 1:nrow(best.day.of.week)
+
+# bar graph visualisation
+pdayofweek <- bar(best.day.of.week, best.day.of.week$DayOfWeek,
+                  "Average Arrival Delays between 2004 and 2006 by Day of Week","Day of Week")
+pdayofweek
+```
+
+Best day of the month to fly
+```{r Find the best day of the month to fly but it is not that intuitive}
+best.day.of.month <- best.time.to.fly(delays.df$DayofMonth)
+
+# create column for x variable in the visualisation and rename the column name
+best.day.of.month <- newcol(best.day.of.month) %>%
+  rename(DayOfMonth=colname)
+
+# answer one of the queries in question 1
+print(paste0(as.numeric(rownames(best.day.of.month)[1]),"th is the best day of the month to fly to minimise delays where the lowest average arrival delayed betwwen year 2004 and 2006 is ", round(best.day.of.month[1,2],1), " minutes."))
+
+# insert new ascending index numbers based on rows
+rownames(best.day.of.month) <- 1:nrow(best.day.of.month)
+
+# bar graph visualisation
+pdayofmonth <- bar(best.day.of.month, best.day.of.month$DayOfMonth,
+                  "Average Arrival Delays between 2004 and 2006 by Day of Month","Day of Month")
+pdayofmonth
+```
+
+Best month to fly
+```{r Find the best month to fly}
+best.month.to.fly <- best.time.to.fly(delays.df$Month)
+
+# create column for x variable in the visualisation and rename the column name
+best.month.to.fly <- newcol(best.month.to.fly) %>%
+  rename(Month=colname)
+
+# answer one of the queries in question 1
+print(paste(as.numeric(rownames(best.month.to.fly)[1]),"(April) is the best month to fly to minimise delays where the lowest average arrival delayed betwwen year 2004 and 2006 is", round(best.month.to.fly[1,2],1),"minutes."))
+
+# insert new ascending index numbers based on rows
+rownames(best.month.to.fly) <- 1:nrow(best.month.to.fly)
+
+# bar graph visualisation
+pmonth <- bar(best.month.to.fly, best.month.to.fly$Month,
+                  "Average Arrival Delays between 2004 and 2006 by Month","Month")
+pmonth
+```
+
+```{r Exporting graphic and Faceting 2x2}
+png(file = './Q1.png') # directory to save the file
+
+#install.packages("gridExtra")
+library(gridExtra)
+# same as par(mfrow=c(r,c))
+grid.arrange(ptimeofday, pdayofweek, pdayofmonth, pmonth,
+             nrow = 2,
+             layout_matrix = rbind(c(1,2),
+                                   c(3,4)))
+
+dev.off()
+```
+
+## 2. Do older planes suffer more delays?
+
+I joined the main delays data with the planes data to access the age of years of the planes in order to answer this question. The plane's data contains two columns of the year and date.
+
+Based on manufacture year. The manufacturing year of the planes can directly access the age of years of the planes.
+```{r Extract data from database and saved as data frame}
+# extract data from database for average arrival delay group by year of planes
+delays.df2a <- dbGetQuery(conn,
+                        "SELECT tailnum, planes.model, planes.year, 
+                        AVG(delays.ArrDelay) AS avg_arr_delay
+                        FROM delays INNER JOIN planes USING(tailnum)
+                        WHERE delays.ArrDelay > 0
+                        GROUP BY planes.year
+                        ORDER BY planes.year")
+
+# remove the first two and the last rows to be more accurate as they are missing values 
+delays.df2a <- delays.df2a[-c(1:2),]
+delays.df2a <- head(delays.df2a,-1)
+```
+
+```{r}
+# extract data from database for average departure delay group by year of planes
+delays.df2b <- dbGetQuery(conn,
+                        "SELECT planes.tailnum, planes.model, planes.year, 
+                        AVG(delays.DepDelay) AS avg_dep_delay
+                        FROM delays INNER JOIN planes USING(tailnum)
+                        WHERE delays.DepDelay > 0
+                        GROUP BY planes.year
+                        ORDER BY planes.year")
+
+# remove the first two and the last rows to be more accurate as they are missing values 
+delays.df2b <- delays.df2b[-c(1:2),]
+delays.df2b <- head(delays.df2b,-1)
+```
+
+```{r}
+# Data Wrangling
+delays.df2 <- merge(delays.df2a, delays.df2b, by="year")
+delays.df2 <- delays.df2[c("year","avg_arr_delay","avg_dep_delay")]
+delays.df2Melted <- reshape2::melt(delays.df2, id.var = "year")  #wide to long format
+
+# Visualisation
+p.Planes.Age <- ggplot(delays.df2Melted, aes(x = year, y = value, 
+                                             col = variable, group = variable)) +
+  geom_line() +
+  geom_point() +
+  geom_hline(yintercept=30, linetype="dashed", size=0.8) +     # Add horizontal line at y = 30
+  labs(title = "Average Delays between 2004 and 2006 by Age of Planes", 
+       x = "Year (Age of Existing Planes in Dataset)", y = "Average Delays (in minutes)") +
+  theme_bw() +
+  theme(title = element_text(face = "bold", size=16), 
+        plot.title = element_text(hjust = 0.5),
+        axis.title = element_text(face = "bold"),
+        axis.text.x = element_text(size = 12, angle = 90, vjust = 0.5, hjust=1),
+        axis.text.y = element_text(size = 12),
+        plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+p.Planes.Age
+```
+
+Based on Year Month of Issue Dates. The issue date of planes refers to the issue cycle that the flight is in, not essentially the year it was built. The following two graphics are just for proving issue date is unstable in determining the differences on delays.
+```{r With Arrival Delay}
+# extract data from database for average arrival delay group by year of planes
+delays.df2c <- dbGetQuery(conn, 
+                  "SELECT planes.issue_date, delays.ArrDelay
+                  FROM delays INNER JOIN planes USING(tailnum)
+                  WHERE delays.ArrDelay > 0")
+
+delays.df2c$Year_Month <- zoo::as.yearmon(as.Date(delays.df2c$issue_date, format = "%m/%d/%Y"))
+
+delays.df2c <- delays.df2c %>%
+  group_by(Year_Month) %>%
+  summarise(avg_arr_delay=mean(ArrDelay,na.rm=TRUE))
+
+
+# remove the last rows to be more accurate as they are missing values 
+delays.df2c <- head(delays.df2c,-1)
+```
+
+```{r With Departure Delay}
+# extract data from database for average departure delay group by year of planes
+delays.df2d <- dbGetQuery(conn, 
+                  "SELECT planes.issue_date, delays.DepDelay
+                  FROM delays INNER JOIN planes USING(tailnum)
+                  WHERE delays.DepDelay > 0")
+
+delays.df2d$Year_Month <- zoo::as.yearmon(as.Date(delays.df2d$issue_date, format = "%m/%d/%Y"))
+
+delays.df2d <- delays.df2d %>%
+  group_by(Year_Month) %>%
+  summarise(avg_dep_delay=mean(DepDelay,na.rm=TRUE))
+
+
+# remove the last rows to be more accurate as they are missing values 
+delays.df2d <- head(delays.df2d,-1)
+```
+
+```{r}
+# Data Wrangling
+delays.df2e <- merge(delays.df2c, delays.df2d, by="Year_Month")
+
+delays.df2eMelted <- reshape2::melt(delays.df2e, id.var = "Year_Month")  #wide to long format
+
+# Visualisation
+p.Planes.Age2 <- ggplot(delays.df2eMelted, aes(x = Year_Month, y = value, 
+                                              col = variable, group = variable)) +
+  geom_line() +
+  labs(title = "Average Delays between 2004 and 2006 by Year Month of Issue Date of Planes", 
+       x = "Year Month of Issue Date", y = "Average Delays (in minutes)") +
+  theme_bw() +
+  theme(title = element_text(face = "bold", size=16), 
+        plot.title = element_text(hjust = 0.5),
+        axis.title = element_text(face = "bold"),
+        axis.text.x = element_text(size = 12, angle = 90, vjust = 0.5, hjust=1),
+        axis.text.y = element_text(size = 12),
+        plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+p.Planes.Age2
+```
+
+Based on Year of Issue Dates.
+```{r With Arrival Delay}
+# extract data from database for average arrival delay group by year of planes
+delays.df2f <- dbGetQuery(conn, 
+                  "SELECT planes.issue_date, delays.ArrDelay
+                  FROM delays INNER JOIN planes USING(tailnum)
+                  WHERE delays.ArrDelay > 0")
+
+delays.df2f$Year <- format(as.Date(delays.df2f$issue_date, format = "%m/%d/%Y"), "%Y")
+
+delays.df2f <- delays.df2f %>%
+  group_by(Year) %>%
+  summarise(avg_arr_delay=mean(ArrDelay,na.rm=TRUE))
+
+
+# remove the last rows to be more accurate as they are missing values 
+delays.df2f <- head(delays.df2f,-1)
+```
+
+```{r With Departure Delay}
+# extract data from database for average departure delay group by year of planes
+delays.df2g <- dbGetQuery(conn, 
+                  "SELECT planes.issue_date, delays.DepDelay
+                  FROM delays INNER JOIN planes USING(tailnum)
+                  WHERE delays.DepDelay > 0")
+
+delays.df2g$Year <- format(as.Date(delays.df2g$issue_date, format = "%m/%d/%Y"), "%Y")
+
+delays.df2g <- delays.df2g %>%
+  group_by(Year) %>%
+  summarise(avg_dep_delay=mean(DepDelay,na.rm=TRUE))
+
+
+# remove the last rows to be more accurate as they are missing values 
+delays.df2g <- head(delays.df2g,-1)
+```
+
+```{r}
+# Data Wrangling
+delays.df2h <- merge(delays.df2f, delays.df2g, by="Year")
+
+delays.df2hMelted <- reshape2::melt(delays.df2h, id.var = "Year")  #wide to long format
+
+# Visualisation
+p.Planes.Age3 <- ggplot(delays.df2hMelted, aes(x = Year, y = value, 
+                                              col = variable, group = variable)) +
+  geom_line() +
+  labs(title = "Average Delays between 2004 and 2006 by Year of Issue Date of Planes", 
+       x = "Year of Issue Date", y = "Average Delays (in minutes)") +
+  theme_bw() +
+  theme(title = element_text(face = "bold", size=16), 
+        plot.title = element_text(hjust = 0.5),
+        axis.title = element_text(face = "bold"),
+        axis.text.x = element_text(size = 12, angle = 90, vjust = 0.5, hjust=1),
+        axis.text.y = element_text(size = 12),
+        plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+p.Planes.Age3
+```
+
+## 3. How does the number of flight flying between different locations change over time?
+```{r Extra data from database}
+df3 <- dbGetQuery(conn,
+                  "SELECT *
+                  FROM delays
+                  WHERE Cancelled=0 AND Diverted=0")
+```
+
+By Year
+```{r}
+# Data Preparation
+df3a <- inner_join(df3, airports, by = c("Origin"="iata")) %>%
+  inner_join(airports, by = c("Dest"="iata"), suffix = c(".origin",".dest")) %>%
+  select(Year, Origin, airport.origin, city.origin, state.origin,
+         Dest, airport.dest, city.dest ,state.dest) %>%
+  mutate(Flying_between_different_cities = paste(city.origin,"->",city.dest)) %>%
+  count(Year, Flying_between_different_cities) %>%
+  rename(Total_Number_of_Flights = n) %>%
+  arrange(desc(Total_Number_of_Flights))
+
+df3a
+```
+
+```{r}
+# Filter interested cities with total number of flights
+x <- df3a$Flying_between_different_cities
+df3a <- df3a %>% 
+  filter(x == "New York -> Boston" | x == "Los Angeles -> San Diego" |
+           x == "Dallas-Fort Worth -> Chicago" | x == "Chicago -> Minneapolis" |
+           x == "San Francisco -> Los Angeles" | x == "Phoenix -> Denver" )
+
+df3a
+```
+
+
+```{r}
+p3 <- ggplot(df3a, aes(x = factor(Year), y= Total_Number_of_Flights, 
+                 col = Flying_between_different_cities, 
+                 group = Flying_between_different_cities)) +
+  geom_line(size = 0.9) +
+  geom_point() +
+  labs(title = "Number of Flights Flying between Different Locations (Cities) over Time (Year)", 
+       x = "Year", y = "Total Number of Flights") +
+  theme_bw() +
+  theme(title = element_text(face = "bold", size=16), 
+        plot.title = element_text(hjust = 0.5),
+        axis.title = element_text(face = "bold"),
+        axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12),
+        plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.key.size = unit(1.1, 'cm'), #change legend key size
+        legend.text = element_text(size=12)) #change legend text font size
+# zoom the plot to see actual size
+p3 
+```
+
+By Year_Month
+```{r}
+# Data Preparation
+#install.packages("zoo")
+df3b <- inner_join(df3, airports, by = c("Origin"="iata")) %>%
+  inner_join(airports, by = c("Dest"="iata"), suffix = c(".origin",".dest")) %>%
+  select(Year, Month, Origin, city.origin, Dest, city.dest) %>%
+  mutate(Flying_between_different_cities = paste(city.origin,"->",city.dest)) %>%
+  mutate(Year_Month = zoo::as.yearmon(paste0(Year,"-",Month))) %>%
+  count(Year_Month, Flying_between_different_cities) %>%
+  rename(Total_Number_of_Flights = n) %>%
+  arrange(desc(Total_Number_of_Flights))
+
+df3b
+```
+
+```{r}
+# Filter interested cities with total number of flights
+y <- df3b$Flying_between_different_cities
+df3b <- df3b %>% 
+  filter(y == "New York -> Boston" | y == "Los Angeles -> San Diego" |
+           y == "Dallas-Fort Worth -> Chicago" | y == "Chicago -> Minneapolis" |
+           y == "San Francisco -> Los Angeles" | y == "Phoenix -> Denver" )
+
+df3b
+```
+
+```{r}
+p3b <- ggplot(df3b, aes(x = factor(Year_Month), y= Total_Number_of_Flights, 
+                 col = Flying_between_different_cities, 
+                 group = Flying_between_different_cities)) +
+  geom_line(size = 0.9) +
+  labs(title = "Number of Flights Flying between Different Locations (Cities) over Time (Year Month)", 
+       x = "Year Month", y = "Total Number of Flights") +
+  theme_bw() +
+  theme(title = element_text(face = "bold", size=16), 
+        plot.title = element_text(hjust = 0.5),
+        axis.title = element_text(face = "bold"),
+        axis.text.x = element_text(size = 12, angle = 90, vjust = 0.5, hjust=1),
+        axis.text.y = element_text(size = 12),
+        plot.background = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.key.size = unit(1.1, 'cm'), #change legend key size
+        legend.text = element_text(size=12)) #change legend text font size
+# zoom the plot to see actual size
+p3b
+```
+
+## 4. Can you detect cascading failures as delays in one airport create delays in others?
+```{r Extra data from database}
+df4 <- dbGetQuery(conn,
+                  "SELECT Origin,Dest,OriAirport.airport AS Origin_Airport,DestAirport.airport AS Dest_Airport,
+                  OriAirport.lat AS Origin_lat, OriAirport.long AS Origin_long,
+                  DestAirport.lat AS Dest_lat, DestAirport.long AS Dest_long, ArrDelay, DepDelay,
+                  CarrierDelay,WeatherDelay,NASDelay,SecurityDelay,LateAircraftDelay,DepTime,ArrTime,TailNum
+                  FROM delays
+                  INNER JOIN airports as OriAirport ON delays.Origin=OriAirport.iata
+                  INNER JOIN airports as DestAirport ON delays.Dest=DestAirport.iata
+                  WHERE delays.Year=2004 
+                  AND delays.Month=1 
+                  AND delays.DayofMonth=1  
+                  AND ArrDelay > 0")
+```
+
+```{r}
+# Exploratory Data Analysis (EDA) and Data Preparation for Q4
+# To identify the airport that has the most arrival delays
+MostArrDelay <- df4 %>%
+  group_by(Dest_Airport) %>%
+  summarise(Total = n()) %>% # to count and find the destination airport where contains the most arrival delays
+  arrange(desc(Total)) # to order the Total column in descending order to identify the airport that has the most arrival delays
+
+MostArrDelay
+```
+
+```{r}
+graph_forQ4 <- function(df,xvar,yvar,name,xname,yname){
+  ggplot(data = df, aes(x = xvar, y= yvar), size= 3) +
+    geom_point() +
+    labs(title = name, 
+         x = xname, y = yname) +
+    theme_bw() +
+    theme(title = element_text(face = "bold", size=16), 
+          plot.title = element_text(hjust = 0.5),
+          axis.title = element_text(face = "bold"),
+          axis.text.x = element_text(size = 12),
+          axis.text.y = element_text(size = 12),
+          plot.background = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank())
+}
+```
+
+```{r}
+p4a <- graph_forQ4(Airport_mostArrDelay,Airport_mostArrDelay$ArrTime,Airport_mostArrDelay$ArrDelay,
+                   "ArrDelay at Dallas-Fort Worth International on 1st Jan 2004",
+                   'Arrival Time','Arrival Delay (in minutes)')
+p4a
+```
+
+```{r Subset the airport that has the most arrival delays}
+Airport_mostArrDelay <- df4 %>%
+  filter(Dest_Airport==as.character(MostArrDelay[1,1])) %>%
+  arrange(ArrTime)
+
+Airport_mostArrDelay_LateAircraftDelay <- Airport_mostArrDelay %>% filter(LateAircraftDelay > 0)
+```
+
+```{r}
+p4b <- graph_forQ4(Airport_mostArrDelay_LateAircraftDelay,
+                   Airport_mostArrDelay_LateAircraftDelay$ArrTime,
+                   Airport_mostArrDelay_LateAircraftDelay$LateAircraftDelay,
+                   'Late Aircraft Delay at Dallas-Fort Worth International on 1st Jan 2004',
+                   'Arrival Time','Late Aircraft Delay (in minutes)')
+p4b
+```
+
+```{r Extract the confirmed affected airports in the cascading failure from the airport that has the most arrival delays on the day itself}
+affectedairports <- dbGetQuery(conn,
+"SELECT Origin,Dest,OriAirport.airport AS Origin_Airport,DestAirport.airport AS Dest_Airport,
+OriAirport.lat AS Origin_lat, OriAirport.long AS Origin_long,
+DestAirport.lat AS Dest_lat, DestAirport.long AS Dest_long, ArrDelay,DepDelay,
+CarrierDelay,WeatherDelay,NASDelay,SecurityDelay,LateAircraftDelay,DepTime,ArrTime,TailNum
+FROM delays
+INNER JOIN airports as OriAirport ON delays.Origin=OriAirport.iata
+INNER JOIN airports as DestAirport ON delays.Dest=DestAirport.iata
+WHERE delays.Year=2004 
+AND delays.Month=1 
+AND delays.DayofMonth=1 
+AND LateAircraftDelay > 0
+AND DepDelay > 0 
+AND ArrDelay > 0
+AND OriAirport.airport='Dallas-Fort Worth International'
+ORDER BY delays.DepTime")
+```
+
+```{r}
+p4c <- graph_forQ4(affectedairports,
+                   affectedairports$DepTime,
+                   affectedairports$LateAircraftDelay,
+                   'Late Aircraft Delay starts from Dallas-Fort Worth International to other Airports on 1st Jan 2004',
+                   'Departure Time','Late Aircraft Delay (in minutes)')
+p4c
+```
+
+```{r}
+# To identify the most affected airport
+MostAffectedAirport <- affectedairports %>%
+  group_by(Dest_Airport) %>%
+  summarise(Total = n()) %>% # to count and find the destination airport where contains the most arrival delays
+  arrange(desc(Total)) # to order the Total column in descending order to identify the airport that has the most arrival delays
+
+affectedairports_list = as.character(MostAffectedAirport[,1]) 
+affectedairports_list
+```
+
+```{r}
+checkTailNum_CascadingDelay <- df4 %>% 
+  filter(Origin_Airport==as.character(MostArrDelay[1,1]) & 
+           Dest_Airport==as.character(MostAffectedAirport[1,1]) &
+           LateAircraftDelay > 0)
+
+affectedLateAircraft_fromMostArrDelayAirport <- as.character(checkTailNum_CascadingDelay[,18])
+
+cascading <- df4 %>% 
+  filter(Origin_Airport==as.character(MostAffectedAirport[1,1]) & 
+           TailNum==affectedLateAircraft_fromMostArrDelayAirport[1])  
+# the first tailnum is luckily the delay propagation
+
+cascading
+```
+
+```{r}
+df_g <- rbind(affectedairports,cascading)
+df_g
+```
+
+similar to simple star graph from big picture
+there is another delays in each airport outside the most 
+
+```{r}
+library(igraph)
+
+nrow(df_g); nrow(unique(df_g[,c("Origin", "Dest")]))
+links <- df_g[order(df_g$Origin, df_g$Dest),]
+stargraph_cascading <- graph_from_data_frame(d=links, directed=T) 
+class(stargraph_cascading)
+
+stargraph_cascading
+E(stargraph_cascading)       # The edges of the "stargraph_cascading" object
+V(stargraph_cascading)      # The vertices of the "stargraph_cascading" object
+
+plot(stargraph_cascading, edge.arrow.size=.4)
+
+stargraph_cascading <- simplify(stargraph_cascading, remove.multiple = F, remove.loops = T) 
+# Set edge color to gray, and the node color to orange. 
+plot(stargraph_cascading, edge.arrow.size=.3, edge.curved=0, 
+     vertex.color="orange", vertex.frame.color="#555555",
+     vertex.label.color="black", vertex.label.cex=.7) 
+
+as_edgelist(net, names=T)
+as_adjacency_matrix(net, attr="LateAircraftDelay")
+as_data_frame(net, what="edges")
+as_data_frame(net, what="vertices")
+```
+
+## Q5. Use the available variables to construct a model that predicts delays.
+```{r Extract data from database and saved query as data frame}
+df <- dbGetQuery(conn,
+"SELECT CRSDepTime,CRSArrTime,CRSElapsedTime,OriAirport.airport AS Origin_Airport,
+DestAirport.airport AS Dest_Airport,ArrDelay
+FROM delays
+INNER JOIN airports as OriAirport ON delays.Origin=OriAirport.iata
+INNER JOIN airports as DestAirport ON delays.Dest=DestAirport.iata")
+```
+
+```{r Overview of the dataset}
+library(skimr)
+skim(df)
+```
+
+```{r}
+# Subsetting dataset as it is too large
+library(caTools)
+set.seed(3)
+split <- sample.split(1:21411788, SplitRatio=0.000025) #insert number instead of dataframe is to let R run faster
+#21411788 is the total numberof rows of the 3 consecutive years data
+# To have enough 535 rows of data (2004-2006) #use 0.000025
+split
+sample <- subset(df, split=="TRUE") 
+str(sample)
+```
+
+```{r Create a target classifier or variable - ArrDelayed}
+Classifsample <- sample %>%
+  mutate(ArrDelayed = 2 * (ArrDelay > 0) +   #if arrdelay > 0 , print 2 as the factor value, 1 otherwise
+            1 * (ArrDelay <= 0))
+
+Classifsample$ArrDelayed[is.na(Classifsample$ArrDelay)] <- 0 #cancelled and diverted flight
+
+str(Classifsample)
+```
+
+```{r}
+library(skimr)
+skim(Classifsample)
+```
+
+```{r Convert data type where appropriate}
+Classifsample$Origin_Airport <- factor(Classifsample$Origin_Airport, order=FALSE)
+Classifsample$Dest_Airport <- factor(Classifsample$Dest_Airport, order=FALSE)
+Classifsample$ArrDelayed <- factor(Classifsample$ArrDelayed)
+```
+
+```{r}
+n <- nrow(Classifsample)
+
+set.seed(33)
+train_set <- sample(n, round(0.7*n)) #70% of data for training the models
+test_set <- setdiff(1:n, train_set)
+```
+
+## Parallelisation
+```{r}
+library(future)
+future::plan('multisession') 
+```
+
+```{r Set up the task}
+library(mlr3)
+library(mlr3learners)
+library(mlr3pipelines)
+library(mlr3tuning)
+task <- TaskClassif$new('Flight Delays Prediction Classifier', backend=Classifsample, target = 'ArrDelayed')
+task$select(c('CRSDepTime','CRSArrTime','CRSElapsedTime','Origin_Airport','Dest_Airport'))
+task
+```
+It is multiclass classification problem.
+
+```{r}
+msr()  #show all measures
+measure <- msr('classif.ce')
+```
+
+Convert factors to numerical values 
+```{r Factor encoder - create dummy variables}
+fencoder <- po("encode", method="treatment",
+               affect_columns=selector_type("factor"))
+```
+
+Some methods require tuning the hyperparameters, and we will later use the following:
+```{r}
+tuner <- tnr('grid_search')
+terminator <- trm('evals', n_evals = 20)
+```
+
+## Multinomial Logistic Regression
+```{r}
+learner_mlr <- lrn("classif.multinom")
+
+gc_mlr <- po('imputemean', affect_columns=selector_type("numeric")) %>>%
+  po('imputesample', affect_columns=selector_type(c("factor"))) %>>%
+  fencoder %>>% 
+  po('scale') %>>%
+  po(learner_mlr)
+
+glrn_mlr <- GraphLearner$new(gc_mlr)
+
+glrn_mlr$train(task, row_ids = train_set)
+glrn_mlr$predict(task, row_ids = test_set)$score()
+```
+
+## Gradient boosting
+```{r}
+set.seed(100)
+#install.packages("xgboost")
+learner_gb <- lrn("classif.xgboost")
+
+gc_gb <- po('imputemean', affect_columns=selector_type("numeric")) %>>%
+  po('imputemode', affect_columns=selector_type(c("factor"))) %>>%
+  fencoder %>>%
+  po(learner_gb)
+
+glrn_gb <- GraphLearner$new(gc_gb)
+
+glrn_gb$train(task, row_ids = train_set)
+glrn_gb$predict(task, row_ids = test_set)$score() 
+```
+
+## Naive Bayes
+```{r}
+learner_nb <- lrn("classif.naive_bayes")
+
+gc_nb <- po('imputemean', affect_columns=selector_type("numeric")) %>>%
+  po('imputemode', affect_columns=selector_type(c("factor"))) %>>%
+  fencoder %>>% 
+  po('scale') %>>%
+  po(learner_nb)
+
+glrn_nb <- GraphLearner$new(gc_nb)
+
+glrn_nb$train(task, row_ids=train_set)
+glrn_nb$predict(task, row_ids=test_set)$score() 
+```
+
+## Random forest
+```{r}
+set.seed(100)
+
+learner_rf <- lrn('classif.ranger') 
+learner_rf$param_set$values <- list(min.node.size=4)
+
+gc_rf <- po('imputemean', affect_columns=selector_type("numeric")) %>>%
+  po('imputemode', affect_columns=selector_type(c("factor"))) %>>%
+  po(learner_rf)
+
+glrn_rf <- GraphLearner$new(gc_rf)
+
+tune_ntrees <- ParamSet$new (list(
+  ParamInt$new('classif.ranger.num.trees', lower = 50, upper = 600)
+))
+
+at_rf <- AutoTuner$new(
+  learner = glrn_rf,
+  resampling = rsmp('cv', folds=3),
+  measure = measure,
+  search_space = tune_ntrees,
+  terminator = terminator,
+  tuner = tuner
+)
+
+at_rf$train(task, row_ids = train_set)
+at_rf$predict(task, row_ids = test_set)$score() 
+```
+
+## BENCHMARKING -- COMPARE RESULTS
+```{r}
+set.seed(100) # for reproducible results
+
+# List of learners
+lrn_list <- list(
+  glrn_mlr,
+  glrn_gb,
+  glrn_nb,
+  at_rf
+)
+```
+
+```{r Set the benchmark design and run the comparisons}
+set.seed(100) # for reproducible results
+bm_design <- benchmark_grid(task=task, resamplings=rsmp('cv', folds=5), 
+                            learners=lrn_list)
+bmr <- benchmark(bm_design, store_models=TRUE)
+```
+
+```{r Visualise comparisons with boxplots}
+library(mlr3viz)
+library(ggplot2)
+
+png(file = './Q5.png') # directory to save the file
+
+autoplot(bmr) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+dev.off()
+```
+
+```{r Print overall measure for each classification model}
+bmr$aggregate(measure)
+```
+
+```{r}
+dbDisconnect(conn)
+```
